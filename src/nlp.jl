@@ -96,7 +96,7 @@ function grad_lagrangian!(nlp::NLP{n,m}, grad, Z, λ) where {n,m}
     return nothing
 end
 
-function hess_lagrangian!(nlp::NLP{n,m}, hess, Z, λ)
+function hess_lagrangian!(nlp::NLP{n,m}, hess, Z, λ) where {n,m}
     ∇jacvec_dynamics!(nlp, hess, Z, λ)
     hess_f!(nlp, hess, Z, false)
 end
