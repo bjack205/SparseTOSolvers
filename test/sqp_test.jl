@@ -15,11 +15,33 @@ include(joinpath(SRC, "meritfuns.jl"))
 include("problems.jl")
 
 ## Generate Problem
+LinearAlgebra.isdiag(fact::QDLDL.QDLDLFactorisation) = nnz(fact.L) == 0
+function QDLDL.solve(fact::QDLDL.QDLDLFactorisation, B::AbstractMatrix)
+    if isdiag(fact)
+        X = fact.Dinv * B
+    else
+        X = copy(B) 
+        QDLDL.solve!(fact, X)
+    end
+    return X
+end
+
+function QDLDL.solve!(fact::QDLDL.QDLDLFactorisation, X::AbstractMatrix)
+    if isdiag(fact)
+        X .= fact.Dinv * X
+    else
+        for x in eachcol(X)
+            QDLDL.solve!(fact, x)
+        end
+    end
+    return X
+end
+
 
 function solve_sqp!(nlp, Z, λ;
         iters=100,
         qp_solver=:osqp,
-        gauss_newton::Bool=false,
+        gauss_newton::Bool=true,
         adaptive_reg::Bool=!gauss_newton,
         verbose=0
     )
@@ -34,6 +56,10 @@ function solve_sqp!(nlp, Z, λ;
         qp_solver = ShurSolver(qp)
     elseif qp_solver == :kkt
         qp_solver = KKTSolver(qp)
+    elseif qp_solver == :qdldl_kkt
+        qp_solver = QDLDLSolver(qp, method=:kkt)
+    elseif qp_solver == :qdldl_shur
+        qp_solver = QDLDLSolver(qp, method=:shur)
     end
 
     reg = 0.0
@@ -52,7 +78,7 @@ function solve_sqp!(nlp, Z, λ;
         end
 
         # Build QP
-        build_qp!(qp, nlp, Z, λ, true) 
+        build_qp!(qp, nlp, Z, λ, gauss_newton) 
 
         # Solve the QP
         if adaptive_reg
@@ -122,9 +148,18 @@ prob = CartpoleProb()
 nlp = NLP(prob)
 Z = Vector(prob.Z)
 λ = zeros(num_duals(nlp))
+
+# Gauss-Newton
 @time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:shur, verbose=1)
 @time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:osqp, verbose=1)
 @time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:kkt, verbose=1)
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_kkt, verbose=1)
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_shur, verbose=1)
+
+# Full Hessian
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:kkt, verbose=1, gauss_newton=false, adaptive_reg=false)
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_kkt, verbose=1, gauss_newton=false, adaptive_reg=false)
+Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_shur, verbose=1, gauss_newton=false, adaptive_reg=false)
 
 qp = TOQP(nlp)
 solver = KKTSolver(qp)

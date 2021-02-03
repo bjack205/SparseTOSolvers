@@ -1,6 +1,7 @@
 using OSQP
 using SparseArrays
 using LinearAlgebra
+using QDLDL
 
 struct TOQP
     Q::SparseMatrixCSC{Float64,Int}  # quadratic cost
@@ -61,9 +62,9 @@ function OSQP.Model(qp::TOQP; kwargs...)
     return model
 end
 
-function solve_qp!(solver::OSQP.Model, qp::TOQP; kwargs...)
+function solve_qp!(solver::OSQP.Model, qp::TOQP; setup=true, kwargs...)
     if num_ineq(qp) == 0
-        OSQP.setup!(solver, P=qp.Q, q=qp.q, A=qp.A, l=qp.b, u=qp.b; kwargs...)
+        setup && OSQP.setup!(solver, P=qp.Q, q=qp.q, A=qp.A, l=qp.b, u=qp.b; kwargs...)
     else
         A = [qp.A; qp.C]
         u = [qp.b; qp.u]
@@ -76,13 +77,28 @@ end
 
 struct ShurSolver end
 ShurSolver(qp::TOQP; kwargs...) = ShurSolver() 
-function solve_qp!(solver::ShurSolver, qp::TOQP; kwargs...)
+function solve_qp!(solver::ShurSolver, qp::TOQP; gauss_newton::Bool=false, kwargs...)
     Q,q = qp.Q, qp.q
     A,b = qp.A, qp.b
-    S = Symmetric(A*(Q\A'))
-    s = A*(Q\q) + b
-    dλ = -S\s
-    dZ = -Q\(A'dλ + q)
+    ispd = gauss_newton
+    if isdiag(Q)
+        QA = Q\A'
+        Qq = Q\q
+        ispd = true  # use cholesky if Q is diagonal
+    else
+        F = ldlt(Symmetric(Q))
+        QA = F \ sparse(A')  # need to make it a new sparse matrix
+        Qq = F \ q
+    end
+    AQA = Symmetric(A*QA)
+    if ispd
+        S = cholesky(AQA)
+    else
+        S = ldlt(AQA)
+    end
+    s = A*(Qq) + b
+    dλ = -(S\s)
+    dZ = -(QA*dλ + Qq)
     return dZ, dλ
 end
 
@@ -108,12 +124,38 @@ KKTSolver(qp::TOQP) = KKTSolver(num_primals(qp), num_duals(qp))
 
 function solve_qp!(solver::KKTSolver, qp::TOQP; kwargs...)
     N,M = num_primals(qp), num_duals(qp)
-    solver.Q .= qp.Q
-    transpose!(solver.A, qp.A)
-    solver.q .= -qp.q
-    solver.b .= qp.b
-    dY = solver.K \ solver.t
+    K = [qp.Q qp.A'; qp.A spzeros(M,M)]
+    t = [-qp.q; qp.b]
+    dY = K \ t
     dZ = dY[1:N]
     dλ = dY[N+1:N+M]
+    return dZ, dλ
+end
+
+struct QDLDLSolver 
+    method::Symbol
+end
+QDLDLSolver(qp::TOQP; method=:kkt) = QDLDLSolver(method)
+
+function solve_qp!(solver::QDLDLSolver, qp::TOQP; kwargs...)
+    if solver.method == :kkt
+        N,M = num_primals(qp), num_duals(qp)
+        K = [qp.Q qp.A'; qp.A I*1e-12]
+        F = qdldl(K)
+        t = [-qp.q; qp.b]
+        dY = F \ t
+        dZ = dY[1:N]
+        dλ = dY[N+1:N+M]
+    else
+        Q,q = qp.Q, qp.q
+        A,b = qp.A, qp.b
+        Q = qdldl(Q)
+        QA = Q\A'
+        Qq = Q\q
+        S = qdldl(A*QA)
+        s = A*(Qq) + b
+        dλ = -(S\s)
+        dZ = -(QA*dλ + Qq)
+    end
     return dZ, dλ
 end
