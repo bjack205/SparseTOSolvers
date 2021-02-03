@@ -22,15 +22,30 @@ nlp = TO.TrajOptNLP(prob, remove_bounds=false)
 step(nlp, ϕ)
 cost(nlp) - cost(solver)
 
+prob = Cartpole() 
+solver = ALTROSolver(prob)
+solve!(solver)
+
+## Solve Cartpole
+prob = Cartpole() 
+TO.add_dynamics_constraints!(prob)
+nlp = TO.TrajOptNLP(prob, remove_bounds=false) 
+ϕ = NormPenalty(10, 2, TO.num_vars(nlp))
+Z0,λ0 = copy(TO.get_primals(nlp)), copy(TO.get_duals(nlp))
+ϕ(nlp, Z0, λ0)
+Z,λ = step(nlp, ϕ, ls_cond=:res)
+ϕ(nlp, Z, λ)
+TO.get_primals(nlp) == Z
+
 ##
 # Form the KKT system
 function KKT_solve(nlp)
     # Evaluate at the current point
     Z = nlp.Z.Z
-    g = TO.grad_f!(nlp)
+    g = TO.grad_f!(nlp, Z)
     H = TO.hess_L!(nlp, Z)
-    d = TO.eval_c!(nlp) 
-    D = TO.jac_c!(nlp)
+    d = TO.eval_c!(nlp, Z) 
+    D = TO.jac_c!(nlp, Z)
     λ = nlp.data.λ
     P = length(d)
     NN = length(Z)
@@ -63,18 +78,21 @@ function residuals(nlp, Z=TO.get_primals(nlp), λ=TO.get_duals(nlp);
 end
 
 function step(nlp, ϕ; alg=:newton, ls_cond=:res, ls_iters=20, p_norm=Inf, c1=1e-4, c2=0.9)
-    Z = TO.get_primals(nlp)
+    Z0 = TO.get_primals(nlp)
+    λ0 = TO.get_duals(nlp)
+    Z = copy(Z0)
     Zbar = copy(Z)
-    λ = TO.get_duals(nlp)
+    λ = copy(λ0)
     λbar = copy(λ)
 
     # Calculate step
     if alg == :newton
         dZ, dλ = KKT_solve(nlp)
     end
-    J0 = TO.eval_f(nlp)
-    res0 = residuals(nlp, Z, λ, recalc=false, p_norm=p_norm)
+    J0 = TO.eval_f(nlp, Z)
+    res0 = residuals(nlp, Z, λ, recalc=true, p_norm=p_norm)
     res = copy(res0)
+    println("Initial cost: ", J0)
     println("Initial residuals: $(res0[1]), $(res0[2])")
 
     # Get step size 
@@ -85,65 +103,34 @@ function step(nlp, ϕ; alg=:newton, ls_cond=:res, ls_iters=20, p_norm=Inf, c1=1e
         @. Zbar = Z + α*dZ
         @. λbar = α * dλ
         res = residuals(nlp, Zbar, λbar, p_norm=p_norm)
-        println("  α = $α, res = $(res[1]), $(res[2])")
 
         if ls_cond == :res
             norm(res, p_norm) < norm(res0, p_norm) && break
+            println("  α = $α, res = $(res[1]), $(res[2])")
         else
             if i == 1
-                J0  = ϕ(nlp)
-                dJ0 = grad(merit, nlp)
+                J0  = ϕ(nlp, Z, λ)
+                dJ0 = grad(ϕ, nlp, Z, λ)'dZ
+                println("Initial merit vals: $J0, $dJ0")
             end
             J = ϕ(nlp, Zbar, λbar)
             if ls_cond == :goldstein
                 gold = J0 + (1-c1)*α*dJ0 <= J <= J0 + c1*α*dJ0
                 gold && break
             else
-                dJ = grad(merit, nlp, Zbar, λbar)'dZ
-                armijo = J <= J + c1*α*dJ
-                curv = dJ0'dZ >= c2*dJ
+                dJ = grad(ϕ, nlp, Zbar, λbar)'dZ
+                armijo = J <= J0 + c1*α*dJ
+                curv = dJ >= c2*dJ0
                 curv2 = abs(dJ) <= c2 * abs(dJ0)
+                println("  α = $α, ϕ = $J, ϕ′=$dJ, ($armijo,$curv,$curv2)")
                 (ls_cond == :armijo && armijo) && break
-                (ls == :wolfe && armijo && curv) && break
-                (ls == :strongwolfe && armijo && curv2) && break
+                (ls_cond == :wolfe && armijo && curv) && break
+                (ls_cond == :strongwolfe && armijo && curv2) && break
             end
         end
         α *= 0.5  # backtrack
     end
-    Z .= Zbar
-    λ .= λbar
-    return res 
-end
-
-abstract type MeritFunction end
-using FiniteDiff
-const GradCache{T,M} = FiniteDiff.GradientCache{Nothing,Nothing,Nothing,Vector{T},M,T,Val{true}()} where {T,M}
-(merit::MeritFunction)(nlp, Z=TO.get_primals(nlp), λ=TO.get_primals(nlp)) = 
-    merit(nlp, Z, λ)
-grad(merit::MeritFunction, nlp, Z=TO.get_primals(nlp), λ=TO.get_primals(nlp)) = 
-    grad(merit, nlp, Z, λ)
-
-mutable struct NormPenalty{T}  <: MeritFunction
-    ρ::T
-    p_norm::T
-    grad::Vector{T}
-    cache::GradCache{T,Val{:central}()}
-    function NormPenalty{T}(ρ,p_norm,N::Integer) where T
-        grad = zeros(T,N)
-        cache = FiniteDiff.GradientCache(grad, zeros(T,N))
-        new{T}(ρ, p_norm, grad, cache)
-    end
-end
-NormPenalty(args...) = NormPenalty{Float64}(args...)
-
-function (merit::NormPenalty)(nlp, Z, λ)
-    J = TO.eval_f(nlp, Z)
-    d = TO.eval_c!(nlp, Z)
-    p = merit.p_norm
-    return J + merit.ρ * norm(d, merit.p_norm)
-end
-
-function grad(merit::NormPenalty, nlp, Z, λ)
-    ϕ(z) = merit(nlp, z, λ)
-    FiniteDiff.finite_difference_gradient!(merit.grad, ϕ, Z, merit.cache)
+    Z0 .= Zbar
+    λ0 .= λbar
+    return Zbar, λbar
 end

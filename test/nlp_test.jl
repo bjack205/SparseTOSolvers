@@ -6,6 +6,7 @@ using FiniteDiff
 using SparseArrays
 using SparseDiffTools
 using BenchmarkTools
+using Test
 
 prob = Cartpole()
 Z = Vector(prob.Z)
@@ -13,11 +14,11 @@ Z = Vector(prob.Z)
 ## Build NLP
 nlp = NLP(prob)
 n,m,T = size(nlp)
-N = num_vars(nlp)
-M = num_cons(nlp)
+N = num_primals(nlp)
+M = num_duals(nlp)
 
 ############################################################################################
-#                              COST EXPANSION
+##                              COST EXPANSION
 ############################################################################################
 # compare costs
 J = eval_f(nlp, Z)
@@ -36,20 +37,31 @@ grad_cache = FiniteDiff.GradientCache(grad, Z)
 hess_cache = FiniteDiff.HessianCache(Z)
 FiniteDiff.finite_difference_gradient!(grad, x->eval_f(nlp,x), Z, grad_cache)
 FiniteDiff.finite_difference_hessian!(hess, x->eval_f(nlp,x), Z, hess_cache)
-grad ≈ grad0
+@test grad ≈ grad0
 norm(hess - hess0)
 
 # Analytical
 hess = spzeros(N,N)
 grad_f!(nlp, grad, Z)
 hess_f!(nlp, hess, Z)
-grad ≈ grad0
-hess ≈ hess0
+@test grad ≈ grad0
+@test hess ≈ hess0
+
+# Hessian-vector product
+hvp = zero(grad)
+hvp_f!(nlp, hvp, Z)
+@test hvp ≈ hess*Z
 
 # Timing results
 @btime ForwardDiff.gradient!($grad, x->eval_f($nlp,x), $Z)
 @btime FiniteDiff.finite_difference_gradient!($grad, x->eval_f($nlp,x), $Z, $grad_cache)
 @btime grad_f!($nlp, $grad, $Z)
+
+@btime begin
+    hess_f!($nlp, $hess, $Z)
+    $hess*$Z
+end
+@btime hvp_f!($nlp, $hvp, $Z, false)  # this is about 20x faster!
 
 ############################################################################################
 #                          CONSTRAINTS
@@ -74,11 +86,11 @@ jac0 = copy(jac)
 # FiniteDiff
 FiniteDiff.finite_difference_jacobian!(jac,con,Z,jac_cache)
 FiniteDiff.finite_difference_jacobian!(jac,con,Z, jac_cache, colorvec=colvec)
-jac ≈ jac0
+@test jac ≈ jac0
 
 # Analytical
 jac_dynamics!(nlp, jac, Z)
-jac ≈ jac0
+@test jac ≈ jac0
 
 # Timing results
 @btime ForwardDiff.jacobian!($jac, $con, $c, $Z)
@@ -94,27 +106,29 @@ L = lagrangian(nlp, Z, λ, c)
 grad_L = zeros(N)
 
 # Check gradient of constraint term
-jacvec_dynamics!(nlp, grad_L, Z, λ)
-grad_L ≈ jac'λ
+jacvec_dynamics!(nlp, grad_L, Z, λ, true)
+@test grad_L ≈ jac'λ
 
 ## Gradient of the Lagrangian ##
 # ForwardDiff 
 lag(x) = lagrangian(nlp, x, λ)
 ForwardDiff.gradient!(grad_L, lag, Z)
 grad_L0 = copy(grad_L)
+@test lag(Z) ≈ eval_f(nlp,Z) - c'λ
 
 # FiniteDiff
 FiniteDiff.finite_difference_gradient!(grad_L, x->lagrangian(nlp,x,λ,c), Z, grad_cache)
-grad_L ≈ grad_L0
+@test grad_L ≈ grad_L0
 
 # Analytical
 grad_lagrangian!(nlp, grad_L, Z, λ)
-grad_L ≈ grad_L0
+@test grad_L ≈ grad_L0
 
 # Timing
+tmp = zeros(n+m)
 @btime ForwardDiff.gradient!($grad, x->lagrangian($nlp,x,$λ), $Z)
 @btime FiniteDiff.finite_difference_gradient!($grad, x->lagrangian($nlp,x,$λ,$c), $Z, $grad_cache)
-@btime grad_lagrangian!($nlp, $grad_L, $Z, $λ)
+@btime grad_lagrangian!($nlp, $grad_L, $Z, $λ, $tmp)
 
 ## Hessian of the Lagrangian ##
 hess_L = spzeros(N,N)
@@ -130,11 +144,11 @@ colorvec = matrix_colors(pat)
 hessL_cache = FiniteDiff.JacobianCache(Z,grad_L)
 FiniteDiff.finite_difference_jacobian!(hess_L, gradlag!, Z, hessL_cache)
 FiniteDiff.finite_difference_jacobian!(hess_L, gradlag!, Z, hessL_cache, colorvec=colorvec)
-hess_L ≈ hess_L0
+@test hess_L ≈ hess_L0
 
 # Analytical
 hess_lagrangian!(nlp, hess_L, Z, λ)
-hess_L ≈ hess_L0
+@test hess_L ≈ hess_L0
 
 # Timing results
 @btime ForwardDiff.jacobian!($hess_L, $gradlag!, $grad_L, $Z)

@@ -2,12 +2,14 @@ using TrajectoryOptimization
 using RobotDynamics
 using StaticArrays
 using RobotZoo
+using MathOptInterface
 const TO = TrajectoryOptimization
 const RD = RobotDynamics
+const MOI = MathOptInterface
 
 import TrajectoryOptimization: num_vars
 
-struct NLP{n,m,Q,L,C}
+struct NLP{n,m,Q,L,C} <: MOI.AbstractNLPEvaluator
     model::L
     obj::Objective{C}
     T::Int  # number of knot points
@@ -29,8 +31,12 @@ struct NLP{n,m,Q,L,C}
     end
 end
 Base.size(nlp::NLP{n,m}) where {n,m} = (n,m,nlp.T)
-num_vars(nlp::NLP{n,m}) where {n,m} = n*nlp.T + m*(nlp.T-1)
-num_cons(nlp::NLP{n,m}) where {n,m} = n*nlp.T
+num_primals(nlp::NLP{n,m}) where {n,m} = n*nlp.T + m*(nlp.T-1)
+num_duals(nlp::NLP) = num_eq(nlp) + num_ineq(nlp)
+num_eq(nlp::NLP{n,m}) where {n,m} = n*nlp.T
+num_ineq(nlp::NLP) = 0
+@inline num_vars(nlp::NLP) = num_primals(nlp)
+
 function NLP(prob::Problem{Q}) where Q
     NLP{Q}(prob.model, prob.obj, Vector(prob.x0), prob.tf)
 end
@@ -84,26 +90,72 @@ function hess_f!(nlp::NLP{n,m,<:Any,<:Any,<:TO.DiagonalCost}, hess, Z, rezero=tr
     end
 end
 
+function hvp_f!(nlp::NLP{n,m,<:Any,<:Any,<:TO.DiagonalCost}, hvp::AbstractVector{T}, Z, rezero=true) where {n,m,T}
+    if rezero
+        for i = 1:length(hvp)
+            hvp[i] = zero(T) 
+        end
+    end
+    xi,ui = nlp.xinds, nlp.uinds
+    obj = nlp.obj
+    i = 1
+    for k = 1:nlp.T
+        dt = k < nlp.T ? nlp.times[k+1] - nlp.times[k] : 1.0
+        for j = 1:n
+            hvp[i] += nlp.obj[k].Q[j,j] * dt * Z[i]
+            i += 1
+        end
+        if k < nlp.T
+            for j = 1:m
+                hvp[i] += nlp.obj[k].R[j,j] * dt * Z[i]
+                i += 1
+            end
+        end
+    end
+end
+
+############################################################################################
+#                                 LAGRANGIAN
+############################################################################################
 function lagrangian(nlp::NLP{n,m}, Z, λ, c=zeros(eltype(Z),length(λ))) where {n,m}
     J = eval_f(nlp, Z)
     eval_dynamics_constraints!(nlp, c, Z)
-    return J + dot(λ,c)
+    return J - dot(λ,c)
 end
 
-function grad_lagrangian!(nlp::NLP{n,m}, grad, Z, λ) where {n,m}
+function grad_lagrangian!(nlp::NLP{n,m}, grad, Z, λ, tmp=zeros(eltype(Z), n+m)) where {n,m}
     grad_f!(nlp, grad, Z)
-    jacvec_dynamics!(nlp, grad, Z, λ, false)
+    grad .*= -1
+    jacvec_dynamics!(nlp, grad, Z, λ, false, tmp)
+    grad .*= -1
     return nothing
 end
 
 function hess_lagrangian!(nlp::NLP{n,m}, hess, Z, λ) where {n,m}
     ∇jacvec_dynamics!(nlp, hess, Z, λ)
+    hess .*= -1
     hess_f!(nlp, hess, Z, false)
 end
 
 function aug_lagrangian(nlp::NLP, Z, λ, μ, c=zero(λ))
     J = lagrangian(nlp, Z, λ)
     return J + 1//2 * μ * dot(c,c)
+end
+
+function primal_residual(nlp::NLP, Z, λ, g=zeros(num_primals(nlp)); p=2)
+    grad_lagrangian!(nlp, g, Z, λ)
+    return norm(g, p)
+end
+
+############################################################################################
+#                                CONSTRAINTS
+############################################################################################
+eval_c!(nlp::NLP, c, Z) = eval_dynamics_constraints!(nlp, c, Z)
+jac_c!(nlp::NLP, jac, Z) = jac_dynamics!(nlp, jac, Z)
+
+function dual_residual(nlp::NLP, Z, λ, c=zeros(num_eq(nlp)); p=2)
+    eval_c!(nlp, c, Z)
+    norm(c, p)
 end
 
 function eval_dynamics_constraints!(nlp::NLP{n_,m_,Q}, c, Z) where {n_,m_,Q}
@@ -144,7 +196,34 @@ function jac_dynamics!(nlp::NLP{n,m,Q}, jac, Z) where {n,m,Q}
     end
 end
 
-function jacvec_dynamics!(nlp::NLP{n,m,Q}, jac, Z, λ, rezero::Bool=true) where {n,m,Q}
+function jac_dynamics!(nlp::NLP{n,m,Q}, jac::AbstractVector, Z) where {n,m,Q}
+    cnt = 1
+    for i = 1:n
+        jac[cnt] = 1
+        cnt += 1
+    end
+
+    xi,ui = nlp.xinds, nlp.uinds
+    idx = xi[1]
+    nblk = n * (n+m)
+    for k = 1:nlp.T-1
+        idx = idx .+ n 
+        zi = [xi[k];ui[k]]
+        dt = nlp.times[k+1] - nlp.times[k]
+        z = StaticKnotPoint(Z[zi], xi[1], ui[1], dt, nlp.times[k])
+        # J = view(jac,idx,zi)
+        Jvec = view(jac,cnt:cnt+nblk-1)
+        J = reshape(Jvec, n, n+m)
+        discrete_jacobian!(Q, J, nlp.model, z, nothing)
+        cnt += nblk
+        for i = 1:n
+            jac[cnt] = -1
+            cnt += 1
+        end
+    end
+end
+
+function jacvec_dynamics!(nlp::NLP{n,m,Q}, jac, Z, λ, rezero::Bool=true, tmp=zeros(n+m)) where {n,m,Q}
     for i = 1:n
         rezero && (jac[i] = 0)
         jac[i] += λ[i]
@@ -159,9 +238,9 @@ function jacvec_dynamics!(nlp::NLP{n,m,Q}, jac, Z, λ, rezero::Bool=true) where 
         dt = nlp.times[k+1] - nlp.times[k]
         z = StaticKnotPoint(Z[zi], xi[1], ui[1], dt, nlp.times[k])
         λ_ = λ[idx2]
-        grad = RD.discrete_jacvec(Q, nlp.model, z, λ_)
+        RD.discrete_jvp!(Q, tmp, nlp.model, z, λ_)
         rezero && (jac[idx[end]] = 0)
-        jac[idx] += grad
+        jac[idx] += tmp 
 
         idx = idx .+ (n + m)
         for i = 1:n
@@ -190,6 +269,9 @@ function ∇jacvec_dynamics!(nlp::NLP{n,m,Q}, hess, Z, λ) where {n,m,Q}
     end
 end
 
+############################################################################################
+#                                  OTHER METHODS
+############################################################################################
 function Vector(Z::RD.AbstractTrajectory{n,m,elT}) where {n,m,elT}
     ix = SVector{n}(1:n)
     iu = SVector{m}(n .+ (1:m))
@@ -217,4 +299,20 @@ function TO.get_trajectory(nlp::NLP{n,m}, Z) where {n,m}
     # zterm = KnotPoint(Z[ix[end]], m, nlp.times[end])
     push!(Z_, KnotPoint(Z[ix[end]], m, nlp.times[end]))
     Traj(Z_)
+end
+
+function find_reg(A; step=0.05, iters=10)::Float64
+    A = Symmetric(A)
+    reg = 0.0
+    F = cholesky(A, check=false)
+    for i = 1:iters
+        if issuccess(F)
+            break
+        else
+            reg += step
+            cholesky!(F, A, shift=reg, check=false)
+        end
+        i == 10 && (reg = -1.0)
+    end
+    return reg
 end
