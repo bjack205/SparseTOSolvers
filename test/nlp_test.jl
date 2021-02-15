@@ -158,6 +158,54 @@ hess_lagrangian!(nlp, hess_L, Z, λ)
 @btime forwarddiff_color_jacobian!($hess_L, $gradlag!, $Z, dx=$grad_L, colorvec=$colorvec)
 @btime hess_lagrangian!($nlp, $hess_L, $Z, $λ)
 
+############################################################################################
+#                              AUGMENTED LAGRANGIAN
+############################################################################################
+ρ = 7.0
+λ = randn(length(c))
+J = eval_f(nlp, Z)
+eval_c!(nlp, c, Z)
+
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ lagrangian(nlp, Z, λ) + 0.5*ρ*c'c
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J - λ'c + 0.5*ρ*c'c
+
+λbar = λ - ρ*c
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J + 1/2ρ*(λbar'λbar - λ'λ) 
+al(Z) = aug_lagrangian(nlp, Z, λ, ρ)
+
+## Gradient ##
+# ForwardDiff
+ForwardDiff.gradient!(grad0, al,Z)
+
+# FiniteDiff
+FiniteDiff.finite_difference_gradient!(grad, al, Z, grad_cache)
+norm(grad - grad0) < 1e-5
+
+# Analytical
+algrad!(nlp, grad, Z, λ, ρ)
+@test grad ≈ grad0
+
+## Hessian ##
+# ForwardDiff
+hess0 = spzeros(N,N)
+ForwardDiff.hessian!(hess0, al, Z)
+
+# FiniteDiff
+FiniteDiff.finite_difference_hessian!(hess, al, Z, hess_cache)
+@test norm(hess - hess0) < 1e-1
+
+# Analytical
+alhess!(nlp, hess, Z, λ, ρ, false)
+@test hess ≈ hess0
+
+# Analytical Gauss-Newton
+hessf = spzeros(N,N)
+hess_f!(nlp, hessf, Z, true)
+
+alhess!(nlp, hess, Z, λ, ρ)
+jac_c!(nlp, jac, Z)
+@test hess ≈ (hessf + ρ*jac'jac)
+
 
 ## modelling toolkit
 using Model

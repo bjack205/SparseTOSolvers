@@ -137,14 +137,53 @@ function hess_lagrangian!(nlp::NLP{n,m}, hess, Z, λ) where {n,m}
     hess_f!(nlp, hess, Z, false)
 end
 
-function aug_lagrangian(nlp::NLP, Z, λ, μ, c=zero(λ))
-    J = lagrangian(nlp, Z, λ)
-    return J + 1//2 * μ * dot(c,c)
-end
-
 function primal_residual(nlp::NLP, Z, λ, g=zeros(num_primals(nlp)); p=2)
     grad_lagrangian!(nlp, g, Z, λ)
     return norm(g, p)
+end
+
+############################################################################################
+#                            AUGMENTED LAGRANGIAN
+############################################################################################
+function aug_lagrangian(nlp::NLP, Z, λ, ρ, c=zeros(eltype(Z), length(λ)))
+    J = lagrangian(nlp, Z, λ, c)
+    return J + 1//2 * ρ * dot(c,c)
+end
+
+function algrad!(nlp::NLP, grad, Z, λ, ρ, 
+        c=zeros(eltype(Z), length(λ)), 
+        jac=zeros(eltype(Z), length(λ), length(Z))
+    )
+    # Gradient of the Lagrangian
+    grad_lagrangian!(nlp, grad, Z, λ)
+    grad ./= ρ
+
+    # Add Gr
+    eval_c!(nlp, c, Z)
+    jacvec_dynamics!(nlp, grad, Z, c, false) 
+    grad .*= ρ
+end
+
+function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true, 
+        c=zeros(eltype(Z), length(λ)),
+        jac=zeros(eltype(Z), length(λ), length(Z))
+    )
+    hess .= 0
+    if gn
+        println("Gauss-Newton")
+        hess .= 0
+    else
+        # Add 2nd-Order dynanics derivatives to Hessian
+        eval_c!(nlp, c, Z)
+        λbar = λ - ρ*c
+        ∇jacvec_dynamics!(nlp, hess, Z, λbar)
+        hess .*= -1
+    end
+    hess_f!(nlp, hess, Z, false)
+
+    # Add constraint penalty
+    jac_c!(nlp, jac, Z)
+    hess .+= ρ*jac'jac
 end
 
 ############################################################################################
