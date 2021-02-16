@@ -66,6 +66,22 @@ function grad_f!(nlp::NLP{n,m,<:Any,<:Any,<:TO.QuadraticCostFunction}, grad, Z) 
     return nothing
 end
 
+function dgrad_f(nlp::NLP{n,m,<:Any,<:Any,<:TO.QuadraticCostFunction}, Z, dZ) where {n,m}
+    xi,ui = nlp.xinds, nlp.uinds
+    obj = nlp.obj
+    out = zero(eltype(Z))
+    for k = 1:nlp.T-1
+        x,u = Z[xi[k]], Z[ui[k]]
+        dx,du = dZ[xi[k]], dZ[ui[k]]
+        dt = nlp.times[k+1] - nlp.times[k]
+        out += dot(x, obj[k].Q, dx)*dt + dot(obj[k].q, dx)*dt
+        out += dot(u, obj[k].R, du)*dt + dot(obj[k].r, du)*dt 
+    end
+    x, dx = Z[xi[end]], dZ[xi[end]]
+    out += dot(x, obj[end].Q, dx) + dot(obj[end].q, dx)
+    return out
+end
+
 function hess_f!(nlp::NLP{n,m,<:Any,<:Any,<:TO.DiagonalCost}, hess, Z, rezero=true) where {n,m}
     if rezero
         for i = 1:size(hess,1)
@@ -152,16 +168,32 @@ end
 
 function algrad!(nlp::NLP, grad, Z, λ, ρ, 
         c=zeros(eltype(Z), length(λ)), 
-        jac=zeros(eltype(Z), length(λ), length(Z))
+        tmp=zeros(eltype(Z), sum(size(nlp)[1:2]))
     )
     # Gradient of the Lagrangian
-    grad_lagrangian!(nlp, grad, Z, λ)
+    grad_lagrangian!(nlp, grad, Z, λ, tmp)
     grad ./= ρ
 
-    # Add Gr
+    # Add Gradient of penalty
     eval_c!(nlp, c, Z)
-    jacvec_dynamics!(nlp, grad, Z, c, false) 
+    jacvec_dynamics!(nlp, grad, Z, c, false, tmp) 
     grad .*= ρ
+    return nothing
+end
+
+function al_dgrad(nlp::NLP, Z, dZ, λ, ρ,
+        grad=zeros(eltype(Z), length(Z)),
+        c=zeros(eltype(Z), length(λ)), 
+        tmp=zeros(eltype(Z), sum(size(nlp)[1:2]))
+    )
+    dphi = dgrad_f(nlp, Z, dZ)
+
+    eval_c!(nlp, c, Z)
+    λbar = c
+    λbar .*= ρ
+    λbar .-= λ
+    jacvec_dynamics!(nlp, grad, Z, λbar, true, tmp)
+    dphi += dot(grad, dZ)
 end
 
 function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true, 
@@ -170,7 +202,6 @@ function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true,
     )
     hess .= 0
     if gn
-        println("Gauss-Newton")
         hess .= 0
     else
         # Add 2nd-Order dynanics derivatives to Hessian
@@ -184,6 +215,12 @@ function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true,
     # Add constraint penalty
     jac_c!(nlp, jac, Z)
     hess .+= ρ*jac'jac
+    # mul!(hess, jac', jac, ρ, 1.0)  # avoids allocs but WAY slower
+end
+
+function dual_update!(nlp::NLP, Z, λ, ρ, c=zeros(eltype(Z), length(λ)))
+    eval_c!(nlp, c, Z)
+    λ .- ρ .* c
 end
 
 ############################################################################################

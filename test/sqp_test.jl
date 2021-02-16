@@ -41,14 +41,20 @@ end
 function solve_sqp!(nlp, Z, λ;
         iters=100,
         qp_solver=:osqp,
-        gauss_newton::Bool=true,
-        adaptive_reg::Bool=!gauss_newton,
-        verbose=0
+        adaptive_reg::Bool=false,
+        verbose=0,
+        qpopts...
     )
 
     # Initialize solution
     qp = TOQP(size(nlp)..., num_eq(nlp), 0)
     ϕ = NormPenalty(10.0, 1, num_primals(nlp), num_eq(nlp))
+    for opt in qpopts
+        if opt.first ∈ keys(qp.opts)
+            qp.opts[opt.first] = opt.second
+        end
+    end
+
 
     if qp_solver == :osqp
         qp_solver = OSQP.Model(qp, verbose=false)
@@ -60,6 +66,13 @@ function solve_sqp!(nlp, Z, λ;
         qp_solver = QDLDLSolver(qp, method=:kkt)
     elseif qp_solver == :qdldl_shur
         qp_solver = QDLDLSolver(qp, method=:shur)
+    end
+
+    # Initialize BFGS w/ Hessian of Lagrangian
+    if qp.opts[:hess] == :bfgs
+        hess_f!(nlp, qp.B, Z)
+        grad_lagrangian!(nlp, qp.g, Z, λ)
+        qp.x .= Z
     end
 
     reg = 0.0
@@ -78,7 +91,7 @@ function solve_sqp!(nlp, Z, λ;
         end
 
         # Build QP
-        build_qp!(qp, nlp, Z, λ, gauss_newton) 
+        build_qp!(qp, nlp, Z, λ)
 
         # Solve the QP
         if adaptive_reg
@@ -140,7 +153,7 @@ function solve_sqp!(nlp, Z, λ;
             α, J - eval_f(nlp, Z), phi0 - phi, dgrad(ϕ, nlp, Z, dZ), reg, ϕ.μ)
 
     end 
-    return Z, λ, dZ
+    return Z, λ, qp 
 end
 
 ##
@@ -148,6 +161,9 @@ prob = CartpoleProb()
 nlp = NLP(prob)
 Z = Vector(prob.Z)
 λ = zeros(num_duals(nlp))
+
+Zsqp, λsqp, qp = solve_sqp!(nlp, copy(Z), copy(λ), 
+    iters=30, qp_solver=:qdldl_shur, verbose=1, hess=:bfgs)
 
 # Gauss-Newton
 @time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:shur, verbose=1)
@@ -157,9 +173,14 @@ Z = Vector(prob.Z)
 @time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_shur, verbose=1)
 
 # Full Hessian
-@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:kkt, verbose=1, gauss_newton=false, adaptive_reg=false)
-@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_kkt, verbose=1, gauss_newton=false, adaptive_reg=false)
-Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_shur, verbose=1, gauss_newton=false, adaptive_reg=false)
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:kkt, hess=:newton, verbose=1)
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_kkt, hess=:newton, verbose=1) 
+@time Zsqp, λsqp, dZ = solve_sqp!(nlp, copy(Z), copy(λ), iters=30, qp_solver=:qdldl_shur, hess=:newton, verbose=1)
+
+# BFGS
+solve_sqp!(nlp, copy(Z), copy(λ), iters=30, 
+    qp_solver=:shur, hess=:bfgs, verbose=1)
+
 
 qp = TOQP(nlp)
 solver = KKTSolver(qp)

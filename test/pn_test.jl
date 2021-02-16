@@ -32,20 +32,21 @@ res_d = dual_residual(nlp, Z, λ)
 J = eval_f(nlp, Z)
 
 # Get QP
-build_qp!(qp, nlp, Z, λ, false)
+build_qp!(qp, nlp, Z, λ, :newton)
 H0 = copy(qp.Q)  # full Hessian 
 
 qp.Q .= 0
 dropzeros!(qp.Q)
-build_qp!(qp, nlp, Z, λ, true)
+build_qp!(qp, nlp, Z, λ, :gauss_newton)
 H,q = qp.Q, qp.q
 D,d = qp.A, qp.b
+
 
 # Solve KKT
 N = num_primals(nlp)
 M = num_duals(nlp)
 K = [H D'; D spzeros(M,M)]
-K = [H D'; D -I*1e-12]
+# K = [H D'; D -I*1e-12]
 t = [-q; d]
 dY = K\t
 dZ = dY[1:N]
@@ -65,6 +66,8 @@ res_p = primal_residual(nlp, Z + dZ2, λ - dλ2)
 res_d = dual_residual(nlp, Z + dZ2, λ - dλ2)
 ϕ(nlp, Z + dZ2) < ϕ(nlp, Z)
 dgrad(ϕ, nlp, Z, dZ2)
+norm(dZ2 - dZ)
+norm(dλ2 - dλ)
 
 # Solve Schur compliment
 S = Symmetric(D*(H\D'))
@@ -83,6 +86,7 @@ norm(dλ3 - dλ)
 
 ssolver = ShurSolver()
 dZ4, dλ4 =  solve_qp!(ssolver, qp)
+dZ4
 res_p = primal_residual(nlp, Z + dZ4, λ - dλ4)
 res_d = dual_residual(nlp, Z + dZ4, λ - dλ4)
 norm(dZ4 - dZ)
@@ -139,3 +143,53 @@ norm(dλ0 - dλ3)
 @btime solve_qp!($qd_kkt, $qp)      # fastest (2x)
 @btime solve_qp!($ssolver, $qp)     # moderate
 @btime solve_qp!($qd_shur, $qp)     # slowest
+
+## Try with BFGS
+Zsqp, λsqp, qp = solve_sqp!(nlp, copy(Z), copy(λ), 
+    iters=30, qp_solver=:kkt, verbose=1, hess=:bfgs)
+build_qp!(qp, nlp, Z, λ)
+
+##
+prob = CartpoleProb()
+nlp = NLP(prob)
+Z = Vector(prob.Z)
+λ = zeros(num_duals(nlp))
+
+# Initialize BFGS 
+prob = CartpoleProb()
+nlp = NLP(prob)
+Z = Vector(prob.Z)
+λ = zeros(num_duals(nlp))
+
+Z, λ, qp = solve_sqp!(nlp, copy(Z), copy(λ), 
+    iters=30, qp_solver=:qdldl_shur, verbose=1, hess=:bfgs)
+
+for i = 1:N
+    qp.B[i,i] += 0.1
+end
+dZ, dλ = solve_qp!(qd_shur, qp)
+res_p = primal_residual(nlp, Z + dZ, λ - dλ)
+res_d = dual_residual(nlp, Z + dZ, λ - dλ)
+ϕ(nlp, Z + dZ) < ϕ(nlp, Z)
+
+##
+build_qp!(qp, nlp, Z, λ)
+bfgs!(qp, Z, qp.q)
+norm(qp.Q - qp.B)
+
+res_p = primal_residual(nlp, Z, λ)
+res_d = dual_residual(nlp, Z, λ)
+J = eval_f(nlp, Z)
+
+qp.opts[:hess] = :bfgs
+dZ0, dλ0 = solve_qp!(kktsolver, qp)
+res_p = primal_residual(nlp, Z + dZ0, λ - dλ0)
+res_d = dual_residual(nlp, Z + dZ0, λ - dλ0)
+
+qp.opts[:hess] = :newton
+dZ1, dλ1 = solve_qp!(kktsolver, qp)
+res_p = primal_residual(nlp, Z + dZ1, λ - dλ1)
+res_d = dual_residual(nlp, Z + dZ1, λ - dλ1)
+
+Z += dZ0
+λ -= dλ0

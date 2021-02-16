@@ -184,6 +184,26 @@ norm(grad - grad0) < 1e-5
 # Analytical
 algrad!(nlp, grad, Z, λ, ρ)
 @test grad ≈ grad0
+algrad!(nlp, grad, Z, λ, ρ, c, tmp)
+
+# Timing
+@btime ForwardDiff.gradient!($grad0, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z)
+@btime FiniteDiff.finite_difference_gradient!($grad0, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z, $grad_cache)
+@btime algrad!($nlp, $grad, $Z, $λ, $ρ, $c, $tmp)
+
+## Directional Derivative ##
+dZ = randn(N)
+grad_f!(nlp, grad0, Z)
+@test dgrad_f(nlp, Z, dZ) ≈ grad0'dZ
+
+algrad!(nlp, grad, Z, λ, ρ)
+@test al_dgrad(nlp, Z, dZ, λ, ρ) ≈ grad'dZ
+
+@btime begin
+    algrad!($nlp, $grad, $Z, $λ, $ρ, $c, $tmp)
+    $grad'*$dZ
+end
+@btime al_dgrad($nlp, $Z, $dZ, $λ, $ρ, $grad, $c, $tmp)
 
 ## Hessian ##
 # ForwardDiff
@@ -197,6 +217,8 @@ FiniteDiff.finite_difference_hessian!(hess, al, Z, hess_cache)
 # Analytical
 alhess!(nlp, hess, Z, λ, ρ, false)
 @test hess ≈ hess0
+alhess!(nlp, hess, Z, λ, ρ, false, c, jac)
+@test hess ≈ hess0
 
 # Analytical Gauss-Newton
 hessf = spzeros(N,N)
@@ -205,6 +227,13 @@ hess_f!(nlp, hessf, Z, true)
 alhess!(nlp, hess, Z, λ, ρ)
 jac_c!(nlp, jac, Z)
 @test hess ≈ (hessf + ρ*jac'jac)
+
+# Timing
+@btime ForwardDiff.hessian!($hess, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z)
+@btime FiniteDiff.finite_difference_hessian!($hess, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z, $hess_cache)
+
+@btime alhess!($nlp, $hess, $Z, $λ, $ρ, false, $c, $jac)
+@btime alhess!($nlp, $hess, $Z, $λ, $ρ, true, $c, $jac)
 
 
 ## modelling toolkit

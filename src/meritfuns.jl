@@ -51,5 +51,6 @@ end
 function minimum_penalty(merit::NormPenalty, Q, q, c, dZ; ρ=0.5) 
     a = dot(dZ, Q, dZ) 
     σ = a > 0
+    num = (q'dZ + σ*0.5*dot(dZ, Q, dZ))
     (q'dZ + σ*0.5*dot(dZ, Q, dZ)) / ((1-ρ) * norm(c,1))
 end
