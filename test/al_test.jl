@@ -1,4 +1,4 @@
-import Pkg; Pkg.activate(joinpath(@__DIR__))
+import Pkg; Pkg.activate(joinpath(@__DIR__,".."))
 using ForwardDiff
 using FiniteDiff
 using SparseArrays

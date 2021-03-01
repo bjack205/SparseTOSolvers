@@ -1,3 +1,4 @@
+import Pkg; Pkg.activate(joinpath(@__DIR__,".."))
 include(joinpath(@__DIR__, "..", "src", "nlp.jl"))
 include("problems.jl")
 
@@ -8,11 +9,11 @@ using SparseDiffTools
 using BenchmarkTools
 using Test
 
-prob = Cartpole()
+prob = CartpoleProb()
 Z = Vector(prob.Z)
 
 ## Build NLP
-nlp = NLP(prob)
+nlp = NLP(prob, true)
 n,m,T = size(nlp)
 N = num_primals(nlp)
 M = num_duals(nlp)
@@ -52,7 +53,7 @@ hvp = zero(grad)
 hvp_f!(nlp, hvp, Z)
 @test hvp ≈ hess*Z
 
-# Timing results
+## Timing results
 @btime ForwardDiff.gradient!($grad, x->eval_f($nlp,x), $Z)
 @btime FiniteDiff.finite_difference_gradient!($grad, x->eval_f($nlp,x), $Z, $grad_cache)
 @btime grad_f!($nlp, $grad, $Z)
@@ -64,13 +65,22 @@ end
 @btime hvp_f!($nlp, $hvp, $Z, false)  # this is about 20x faster!
 
 ############################################################################################
-#                          CONSTRAINTS
+##                                 CONSTRAINTS
 ############################################################################################
 # constraints
 Z = rand(N)
 jac = spzeros(M,N)
 c = zeros(M)
 con(c,x) = eval_dynamics_constraints!(nlp,c,x)
+
+# Test constraint
+con(c,Z)
+@test c[1:n] ≈ Z[1:n] - prob.x0
+@test c[n+1:2n] ≈ discrete_dynamics(RK3, prob.model, 
+    Z[nlp.xinds[1]] , Z[nlp.uinds[1]], 0.0, prob.Z[1].dt) - Z[nlp.xinds[2]]
+if termcon(nlp)
+    @test c[end-n+1:end] ≈ Z[nlp.xinds[end]] - prob.xf
+end
 
 # FiniteDiff coloring
 jac_cache = FiniteDiff.JacobianCache(Z,c)
@@ -92,7 +102,7 @@ FiniteDiff.finite_difference_jacobian!(jac,con,Z, jac_cache, colorvec=colvec)
 jac_dynamics!(nlp, jac, Z)
 @test jac ≈ jac0
 
-# Timing results
+## Timing results
 @btime ForwardDiff.jacobian!($jac, $con, $c, $Z)
 @btime forwarddiff_color_jacobian!($jac, $con, $Z, dx=$c, colorvec=$colvec)
 @btime FiniteDiff.finite_difference_jacobian!($jac,$con,$Z, $jac_cache, colorvec=$colvec)
@@ -234,6 +244,43 @@ jac_c!(nlp, jac, Z)
 
 @btime alhess!($nlp, $hess, $Z, $λ, $ρ, false, $c, $jac)
 @btime alhess!($nlp, $hess, $Z, $λ, $ρ, true, $c, $jac)
+
+
+############################################################################################
+##                                 TERMINAL CONSTRAINT
+############################################################################################
+
+# constraints
+Z = rand(N)
+jac = spzeros(M,N)
+c = zeros(M)
+con(c,x) = eval_dynamics_constraints!(nlp,c,x)
+
+# FiniteDiff coloring
+jac_cache = FiniteDiff.JacobianCache(Z,c)
+FiniteDiff.finite_difference_jacobian!(jac,con,Z,jac_cache)
+spar = jac .!= 0
+colvec = matrix_colors(spar)
+
+# ForwardDiff + coloring
+ForwardDiff.jacobian!(jac, con, c, Z)
+forwarddiff_color_jacobian!(jac, con, Z, dx=c, colorvec=colvec)
+jac0 = copy(jac)
+
+# FiniteDiff
+FiniteDiff.finite_difference_jacobian!(jac,con,Z,jac_cache)
+FiniteDiff.finite_difference_jacobian!(jac,con,Z, jac_cache, colorvec=colvec)
+@test jac ≈ jac0
+
+# Analytical
+jac_dynamics!(nlp, jac, Z)
+@test jac ≈ jac0
+
+## Timing results
+@btime ForwardDiff.jacobian!($jac, $con, $c, $Z)
+@btime forwarddiff_color_jacobian!($jac, $con, $Z, dx=$c, colorvec=$colvec)
+@btime FiniteDiff.finite_difference_jacobian!($jac,$con,$Z, $jac_cache, colorvec=$colvec)
+@btime jac_dynamics!($nlp, $jac, $Z)
 
 
 ## modelling toolkit
