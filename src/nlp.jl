@@ -15,30 +15,32 @@ struct NLP{n,m,Q,L,C} <: MOI.AbstractNLPEvaluator
     T::Int  # number of knot points
     tf::Float64
     x0::Vector{Float64}  # initial condition
+    xf::Vector{Float64}  # final condition
     xinds::Vector{SVector{n,Int}}
     uinds::Vector{SVector{m,Int}}
     times::Vector{Float64}
-    function NLP{Q}(model::AbstractModel, obj::Objective, x0::Vector, tf::Real) where Q
+    function NLP{Q}(model::AbstractModel, obj::Objective, x0::Vector, tf::Real, xf=zero(x0)*NaN) where Q
         n,m = size(model)
         T = length(obj)
-        @show T
         xinds = [SVector{n}((k-1)*(n+m) .+ (1:n)) for k = 1:T]
         uinds = [SVector{m}((k-1)*(n+m) .+ (n+1:n+m)) for k = 1:T-1]
         times = collect(range(0, tf, length=T))
         new{n,m,Q,typeof(model),typeof(obj[1])}(
-            model, obj, T, tf, x0, xinds, uinds, times
+            model, obj, T, tf, x0, xf, xinds, uinds, times
         )
     end
 end
 Base.size(nlp::NLP{n,m}) where {n,m} = (n,m,nlp.T)
 num_primals(nlp::NLP{n,m}) where {n,m} = n*nlp.T + m*(nlp.T-1)
 num_duals(nlp::NLP) = num_eq(nlp) + num_ineq(nlp)
-num_eq(nlp::NLP{n,m}) where {n,m} = n*nlp.T
+num_eq(nlp::NLP{n,m}) where {n,m} = n*nlp.T + n*termcon(nlp)
 num_ineq(nlp::NLP) = 0
 @inline num_vars(nlp::NLP) = num_primals(nlp)
+termcon(nlp::NLP) = all(isfinite, nlp.xf)
 
-function NLP(prob::Problem{Q}) where Q
-    NLP{Q}(prob.model, prob.obj, Vector(prob.x0), prob.tf)
+function NLP(prob::Problem{Q}, termcon::Bool=false) where Q
+    xf = termcon ? prob.xf : zero(prob.x0)*NaN
+    NLP{Q}(prob.model, prob.obj, Vector(prob.x0), prob.tf, xf)
 end
 
 function eval_f(nlp::NLP, Z)
@@ -218,6 +220,43 @@ function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true,
     # mul!(hess, jac', jac, ρ, 1.0)  # avoids allocs but WAY slower
 end
 
+function pdal_sys!(nlp::NLP, hess, grad, Z, λtilde, λ, ρ, gn::Bool=true,
+        c=zeros(eltype(Z), length(λ)),
+        ∇c=zeros(eltype(Z), length(λ), length(Z))
+    )
+    N,M = num_primals(nlp), num_duals(nlp)
+    iP,iD = 1:N, N .+ (1:M)
+
+    # Hessian
+    hess1 = view(hess, iP, iP) 
+    hess2 = view(hess, iP, iD)
+    hess3 = view(hess, iD, iP)
+    hess4 = view(hess, iD, iD) 
+
+    eval_c!(nlp, c, Z)
+    jac_c!(nlp, ∇c, Z) 
+    if gn
+        hess_f!(nlp, hess1, Z)
+    else
+        hess_lagrangian!(nlp, hess1, Z, λtilde)
+    end
+    jac_c!(nlp, hess3, Z)
+    hess3 .*= -1
+
+    iρ = inv(ρ)
+    for i in iD 
+        hess[i,i] = -iρ
+    end
+
+    # Gradient
+    grad1 = view(grad, iP)
+    grad2 = view(grad, iD)
+    grad_lagrangian!(nlp, grad1, Z, λtilde)
+    
+    grad2 .= (λ .- λtilde) .* iρ .- c
+    return nothing
+end
+
 function dual_update!(nlp::NLP, Z, λ, ρ, c=zeros(eltype(Z), length(λ)))
     eval_c!(nlp, c, Z)
     λ .- ρ .* c
@@ -250,6 +289,13 @@ function eval_dynamics_constraints!(nlp::NLP{n_,m_,Q}, c, Z) where {n_,m_,Q}
         dt = nlp.times[k+1] - nlp.times[k]
         c[idx] = discrete_dynamics(Q, nlp.model, x, u, nlp.times[k], dt) - x⁺
     end
+
+    # terminal constraint
+    if termcon(nlp)
+        idx = idx .+ n
+        c[idx] = Z[xi[T]] - nlp.xf
+    end
+    return nothing
 end
 
 function jac_dynamics!(nlp::NLP{n,m,Q}, jac, Z) where {n,m,Q}
@@ -268,6 +314,12 @@ function jac_dynamics!(nlp::NLP{n,m,Q}, jac, Z) where {n,m,Q}
         discrete_jacobian!(Q, J, nlp.model, z, nothing)
         for i = 1:n
             jac[idx[i], zi[end]+i] = -1
+        end
+    end
+    if termcon(nlp)
+        idx = idx .+ n 
+        for i = 1:n
+            jac[idx[i], xi[end][i]] = 1
         end
     end
 end
@@ -297,6 +349,11 @@ function jac_dynamics!(nlp::NLP{n,m,Q}, jac::AbstractVector, Z) where {n,m,Q}
             cnt += 1
         end
     end
+    if termcon(nlp)
+        for i = 1:n
+            jac[cnt+i] = 1
+        end
+    end
 end
 
 function jacvec_dynamics!(nlp::NLP{n,m,Q}, jac, Z, λ, rezero::Bool=true, tmp=zeros(n+m)) where {n,m,Q}
@@ -322,6 +379,12 @@ function jacvec_dynamics!(nlp::NLP{n,m,Q}, jac, Z, λ, rezero::Bool=true, tmp=ze
         for i = 1:n
             rezero && (jac[idx[i]] = 0)
             jac[idx[i]] += -λ_[i]
+        end
+    end
+    if termcon(nlp)
+        λT = λ[idx2 .+ n]
+        for i = 1:n
+            jac[idx[i]] += λT[i]
         end
     end
 end
