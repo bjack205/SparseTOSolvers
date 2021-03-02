@@ -3,6 +3,7 @@
 function al_solve(nlp, Z, λ=zeros(num_eq(nlp)); 
         ρ=10.0,   # initial penalty
         ϕ=10.0,   # penalty scaling
+        ρterm = ρ,
         max_iters = 20, 
         eps_constraint = 1e-6,
         eps_inner = 1e-6,
@@ -11,11 +12,17 @@ function al_solve(nlp, Z, λ=zeros(num_eq(nlp));
         eps_fn = sqrt(eps_inner),
         pd::Bool=false,
         verbose=2,
+        max_penalty=1e8,
         kwargs...
     )
     
     c = zero(λ)
     iters = 0
+    linres = Float64[]
+    ρ = fill(ρ, length(λ))
+    if termcon(nlp)
+        ρ[end] = ρterm
+    end
     for i = 1:max_iters
         # Solve unconstrained problem
         if pd
@@ -24,32 +31,35 @@ function al_solve(nlp, Z, λ=zeros(num_eq(nlp));
                 verbose=verbose>1
             ) 
         else
-            iters += al_newton!(nlp, Z, λ, ρ, 
+            inner_iters, lres = al_newton!(nlp, Z, λ, ρ, 
                 max_iters=newton_iters, eps=eps_inner, eps_fn=eps_fn, reg=newton_reg, 
                 verbose=verbose>1; kwargs... 
             ) 
+            iters += inner_iters
+            append!(linres, lres)
         end
 
         # dual update
         eval_c!(nlp, c, Z)
         if !pd
-            λ .= λ - ρ*c
+            λ .= λ - ρ .* c
         end
         
         # penalty update
-        ρ *= ϕ
+        ρ .*= ϕ
+        ρ .= min.(max_penalty, ρ)
 
         # Convergence
         pres = primal_residual(nlp, Z, λ, p=Inf)
         printstyled("Outer Loop ", i, ": ", bold=true, color=:yellow)
         verbose > 0 && @printf("viol: %0.2e, pres: %0.2e, ρ = %.1e, iters = %d\n", 
-            norm(c, Inf), pres, ρ, iters)
+            norm(c, Inf), pres, ρ[1], iters)
         if norm(c, Inf) < eps_constraint
             break
         end
     end
 
-    return Z, λ 
+    return Z, λ, linres
 end
 function al_newton!(nlp, Z, λ, ρ;
         max_iters = 25,
@@ -59,6 +69,7 @@ function al_newton!(nlp, Z, λ, ρ;
         pd::Bool=false,
         verbose=false,
         linear_solve::Symbol = :cholesky,
+        refine = 0
     )
     N,M = num_primals(nlp), num_duals(nlp)
     hess = spzeros(N,N)
@@ -67,6 +78,7 @@ function al_newton!(nlp, Z, λ, ρ;
 
     gn = true 
     iters = 0
+    linres = Float64[]
     for iter = 1:max_iters
         alhess!(nlp, hess, Z, λ, ρ, gn)
         algrad!(nlp, grad, Z, λ, ρ)
@@ -78,12 +90,20 @@ function al_newton!(nlp, Z, λ, ρ;
             gn = false
         end
 
+        H = Symmetric(hess,:L) + Ireg 
         if linear_solve == :cholesky
-            dZ = -(cholesky(Symmetric(hess,:L) + Ireg)\grad)
+            dZ = -(cholesky(H)\grad)
         elseif linear_solve == :pcg
-            dZ = cg(Symmetric(hess,:L) + Ireg, -grad)
+            dZ = cg(H, -grad)
         end
-        err = norm(hess*dZ + grad)
+        for i = 1:refine
+            r = hess*dZ + grad
+            println(norm(r))
+            dZ .-= H\r
+        end
+
+        err = norm(H*dZ + grad)
+        push!(linres, err)
         phi0 = aug_lagrangian(nlp, Z, λ, ρ)
         dphi0 = grad'dZ
         phi = 0.0
@@ -110,7 +130,7 @@ function al_newton!(nlp, Z, λ, ρ;
             @printf("  J: %0.2f → %0.2f (%0.2e), ϕ: %0.2f → %0.2f (%0.2e), ϕ′: %0.2e, α: %0.2f, cond: %0.1e, pres: %0.2e, dres: %0.2e, grad: %0.2e, err: %0.2e\n", 
                 J0, J, J0-J, 
                 phi0, phi, phi0-phi,
-                dphi0, α, cond(Matrix(hess)),
+                dphi0, α, 0, #cond(Matrix(hess)),
                 norm(primal_residual(nlp, Z̄, λ, p=Inf)),
                 norm(dual_residual(nlp, Z̄, λ, p=Inf)),
                 norm(grad),
@@ -124,7 +144,7 @@ function al_newton!(nlp, Z, λ, ρ;
         # primal_residual(nlp, Z + α*dZ, λ)
         Z .+= α .* dZ
     end
-    return iters
+    return iters, linres
 end
 
 function pdal_newton!(nlp, Z, λ, ρ;
