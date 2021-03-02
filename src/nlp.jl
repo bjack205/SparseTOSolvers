@@ -165,7 +165,7 @@ end
 ############################################################################################
 function aug_lagrangian(nlp::NLP, Z, λ, ρ, c=zeros(eltype(Z), length(λ)))
     J = lagrangian(nlp, Z, λ, c)
-    return J + 1//2 * ρ * dot(c,c)
+    return J + 1//2 * dot(c, ρ .* c)
 end
 
 function algrad!(nlp::NLP, grad, Z, λ, ρ, 
@@ -174,12 +174,12 @@ function algrad!(nlp::NLP, grad, Z, λ, ρ,
     )
     # Gradient of the Lagrangian
     grad_lagrangian!(nlp, grad, Z, λ, tmp)
-    grad ./= ρ
+    # grad ./= ρ
 
     # Add Gradient of penalty
     eval_c!(nlp, c, Z)
-    jacvec_dynamics!(nlp, grad, Z, c, false, tmp) 
-    grad .*= ρ
+    jacvec_dynamics!(nlp, grad, Z, ρ .* c, false, tmp) 
+    # grad .*= ρ
     return nothing
 end
 
@@ -208,7 +208,7 @@ function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true,
     else
         # Add 2nd-Order dynanics derivatives to Hessian
         eval_c!(nlp, c, Z)
-        λbar = λ - ρ*c
+        λbar = λ .- ρ .* c
         ∇jacvec_dynamics!(nlp, hess, Z, λbar)
         hess .*= -1
     end
@@ -216,7 +216,8 @@ function alhess!(nlp::NLP, hess, Z, λ, ρ, gn::Bool=true,
 
     # Add constraint penalty
     jac_c!(nlp, jac, Z)
-    hess .+= ρ*jac'jac
+    Iρ = Diagonal(ρ)
+    hess .+= jac'Iρ*jac
     # mul!(hess, jac', jac, ρ, 1.0)  # avoids allocs but WAY slower
 end
 
@@ -243,9 +244,9 @@ function pdal_sys!(nlp::NLP, hess, grad, Z, λtilde, λ, ρ, gn::Bool=true,
     jac_c!(nlp, hess3, Z)
     hess3 .*= -1
 
-    iρ = inv(ρ)
+    iρ = inv.(ρ)
     for i in iD 
-        hess[i,i] = -iρ
+        hess[i,i] = -iρ[i]
     end
 
     # Gradient

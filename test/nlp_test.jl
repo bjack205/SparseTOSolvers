@@ -171,16 +171,20 @@ hess_lagrangian!(nlp, hess_L, Z, λ)
 ############################################################################################
 #                              AUGMENTED LAGRANGIAN
 ############################################################################################
-ρ = 7.0
+# ρ = 7.0
+# ρ = fill(7.0, length(λ))
+ρ = rand(length(c)) * 7.0
+Iρ = Diagonal(sqrt.(ρ))
 λ = randn(length(c))
 J = eval_f(nlp, Z)
 eval_c!(nlp, c, Z)
 
-@test aug_lagrangian(nlp, Z, λ, ρ) ≈ lagrangian(nlp, Z, λ) + 0.5*ρ*c'c
-@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J - λ'c + 0.5*ρ*c'c
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ lagrangian(nlp, Z, λ) + 0.5*(Iρ*c)'*(Iρ*c)
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J - λ'c + 0.5*(Iρ*c)'*(Iρ*c)
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J - λ'c + 0.5*(Iρ*c)'*(Iρ*c)
 
-λbar = λ - ρ*c
-@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J + 1/2ρ*(λbar'λbar - λ'λ) 
+λbar = λ - Iρ*Iρ * c
+@test aug_lagrangian(nlp, Z, λ, ρ) ≈ J + 1/2*((Iρ\λbar)'*(Iρ\λbar) - (Iρ\λ)'*(Iρ\λ)) 
 al(Z) = aug_lagrangian(nlp, Z, λ, ρ)
 
 ## Gradient ##
