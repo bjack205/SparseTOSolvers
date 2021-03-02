@@ -78,15 +78,15 @@ function RD.dynamics(model::Cartpole2, x, u)
     return SA[dp,dq,ddp,ddq]
 end
 
-function CartpoleProb(N=101)
+function CartpoleProb(N=101, Qd=10.0; mc=2.0, mp=0.5, l=0.5)
     # model = Cartpole2()
-    model = RobotZoo.Cartpole(2.0, 0.5, 0.5, 9.81)
+    model = RobotZoo.Cartpole(mc, mp, l, 9.81)
     n,m = size(model)
     tf = 2.
     dt = tf/(N-1)
 
     Q = 1.0e-3*Diagonal(@SVector ones(n))
-    Qf = 10.0*Diagonal(@SVector ones(n))
+    Qf = Qd*Diagonal(@SVector ones(n))
     R = 1.0e-0*Diagonal(@SVector ones(m))
     x0 = @SVector zeros(n)
     xf = @SVector [0.8, pi, 0, 0]
