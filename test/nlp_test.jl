@@ -134,7 +134,7 @@ FiniteDiff.finite_difference_gradient!(grad_L, x->lagrangian(nlp,x,λ,c), Z, gra
 grad_lagrangian!(nlp, grad_L, Z, λ)
 @test grad_L ≈ grad_L0
 
-# Timing
+## Timing
 tmp = zeros(n+m)
 @btime ForwardDiff.gradient!($grad, x->lagrangian($nlp,x,$λ), $Z)
 @btime FiniteDiff.finite_difference_gradient!($grad, x->lagrangian($nlp,x,$λ,$c), $Z, $grad_cache)
@@ -160,7 +160,7 @@ FiniteDiff.finite_difference_jacobian!(hess_L, gradlag!, Z, hessL_cache, colorve
 hess_lagrangian!(nlp, hess_L, Z, λ)
 @test hess_L ≈ hess_L0
 
-# Timing results
+## Timing results
 @btime ForwardDiff.jacobian!($hess_L, $gradlag!, $grad_L, $Z)
 @btime FiniteDiff.finite_difference_jacobian!($hess_L, $gradlag!, $Z, $hessL_cache)
 @btime FiniteDiff.finite_difference_jacobian!($hess_L, $gradlag!, $Z, $hessL_cache, 
@@ -196,11 +196,12 @@ FiniteDiff.finite_difference_gradient!(grad, al, Z, grad_cache)
 norm(grad - grad0) < 1e-5
 
 # Analytical
+tmp = rand(n+m)
 algrad!(nlp, grad, Z, λ, ρ)
 @test grad ≈ grad0
 algrad!(nlp, grad, Z, λ, ρ, c, tmp)
 
-# Timing
+## Timing
 @btime ForwardDiff.gradient!($grad0, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z)
 @btime FiniteDiff.finite_difference_gradient!($grad0, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z, $grad_cache)
 @btime algrad!($nlp, $grad, $Z, $λ, $ρ, $c, $tmp)
@@ -213,6 +214,7 @@ grad_f!(nlp, grad0, Z)
 algrad!(nlp, grad, Z, λ, ρ)
 @test al_dgrad(nlp, Z, dZ, λ, ρ) ≈ grad'dZ
 
+##
 @btime begin
     algrad!($nlp, $grad, $Z, $λ, $ρ, $c, $tmp)
     $grad'*$dZ
@@ -240,9 +242,9 @@ hess_f!(nlp, hessf, Z, true)
 
 alhess!(nlp, hess, Z, λ, ρ)
 jac_c!(nlp, jac, Z)
-@test hess ≈ (hessf + ρ*jac'jac)
+@test hess ≈ (hessf + jac'Diagonal(ρ)*jac)
 
-# Timing
+## Timing
 @btime ForwardDiff.hessian!($hess, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z)
 @btime FiniteDiff.finite_difference_hessian!($hess, x->aug_lagrangian($nlp, x, $λ, $ρ), $Z, $hess_cache)
 

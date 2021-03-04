@@ -179,7 +179,7 @@ function algrad!(nlp::NLP, grad, Z, λ, ρ,
     # Add Gradient of penalty
     eval_c!(nlp, c, Z)
     jacvec_dynamics!(nlp, grad, Z, ρ .* c, false, tmp) 
-    grad .*= ρ
+    # grad .*= ρ
     return nothing
 end
 
@@ -243,6 +243,7 @@ function pdal_sys!(nlp::NLP, hess, grad, Z, λtilde, λ, ρ, gn::Bool=true,
     end
     jac_c!(nlp, hess3, Z)
     hess3 .*= -1
+    transpose!(hess2, hess3)
 
     iρ = inv.(ρ)
     for i in iD 
